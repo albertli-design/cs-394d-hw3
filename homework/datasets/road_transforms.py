@@ -153,8 +153,14 @@ class DepthLoader(ImageLoader):
 class RandomHorizontalFlip(tv_transforms.RandomHorizontalFlip):
     def __call__(self, sample: dict):
         if np.random.rand() < self.p:
-            sample["image"] = np.flip(sample["image"], axis=2)
-            sample["track"] = np.flip(sample["track"], axis=1)
+            sample["image"] = np.ascontiguousarray(np.flip(sample["image"], axis=2))
+            sample["depth"] = np.ascontiguousarray(np.flip(sample["depth"], axis=1))
+            track = np.ascontiguousarray(np.flip(sample["track"], axis=1))
+            # left (1) and right (2) swap sides after a horizontal flip
+            swapped = track.copy()
+            swapped[track == 1] = 2
+            swapped[track == 2] = 1
+            sample["track"] = swapped
 
         return sample
 

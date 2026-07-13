@@ -99,46 +99,34 @@ class Detector(torch.nn.Module):
         self.register_buffer("input_mean", torch.as_tensor(INPUT_MEAN))
         self.register_buffer("input_std", torch.as_tensor(INPUT_STD))
 
-        # encoder: downsample spatially, increase channels
-        # Input (b, 3, h, w) -> Down1 (b, 16, h/2, w/2) -> Down2 (b, 32, h/4, w/4)
-        self.down1 = nn.Sequential(
-            nn.Conv2d(in_channels, 16, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(16),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(16),
-            nn.ReLU(inplace=True),
-        )
-        self.down2 = nn.Sequential(
-            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-        )
+        def conv_block(cin: int, cout: int) -> nn.Sequential:
+            return nn.Sequential(
+                nn.Conv2d(cin, cout, kernel_size=3, stride=1, padding=1, bias=False),
+                nn.BatchNorm2d(cout),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(cout, cout, kernel_size=3, stride=1, padding=1, bias=False),
+                nn.BatchNorm2d(cout),
+                nn.ReLU(inplace=True),
+            )
 
-        # decoder: upsample back to original resolution (with skip connections)
-        # Up1: (b, 32+16, h/2, w/2) -> (b, 16, h/2, w/2)
-        # Up2: (b, 16+16, h, w) -> (b, 16, h, w)
-        self.up1 = nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1)
-        self.up1_conv = nn.Sequential(
-            nn.Conv2d(16 + 16, 16, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(16),
-            nn.ReLU(inplace=True),
-        )
-        self.up2 = nn.ConvTranspose2d(16, 16, kernel_size=4, stride=2, padding=1)
-        self.up2_conv = nn.Sequential(
-            nn.Conv2d(16 + in_channels, 16, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(16),
-            nn.ReLU(inplace=True),
-        )
+        # U-Net: stem at full res, then 3 downsample levels
+        # (b,3,h,w) -> stem 32 -> d1 64 @ h/2 -> d2 128 @ h/4 -> d3 256 @ h/8
+        self.stem = conv_block(in_channels, 32)
+        self.down1 = nn.Sequential(nn.MaxPool2d(2), conv_block(32, 64))
+        self.down2 = nn.Sequential(nn.MaxPool2d(2), conv_block(64, 128))
+        self.down3 = nn.Sequential(nn.MaxPool2d(2), conv_block(128, 256))
 
-        # separate heads from shared features
-        self.seg_head = nn.Conv2d(16, num_classes, kernel_size=1)
+        self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.up3_conv = conv_block(128 + 128, 128)
+        self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.up2_conv = conv_block(64 + 64, 64)
+        self.up1 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
+        self.up1_conv = conv_block(32 + 32, 32)
+
+        self.seg_head = nn.Conv2d(32, num_classes, kernel_size=1)
         self.depth_head = nn.Sequential(
-            nn.Conv2d(16, 1, kernel_size=1),
-            nn.Sigmoid(),  
+            nn.Conv2d(32, 1, kernel_size=1),
+            nn.Sigmoid(),
         )
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -154,20 +142,22 @@ class Detector(torch.nn.Module):
                 - logits (b, num_classes, h, w)
                 - depth (b, h, w)
         """
-        # optional: normalizes the input
         z = (x - self.input_mean[None, :, None, None]) / self.input_std[None, :, None, None]
 
-        d1 = self.down1(z)       
-        d2 = self.down2(d1)      
+        s0 = self.stem(z)       # (b, 32, h, w)
+        s1 = self.down1(s0)     # (b, 64, h/2, w/2)
+        s2 = self.down2(s1)     # (b, 128, h/4, w/4)
+        s3 = self.down3(s2)     # (b, 256, h/8, w/8)
 
-        u1 = self.up1(d2)        
-        u1 = self.up1_conv(torch.cat([u1, d1], dim=1))
+        u = self.up3(s3)
+        u = self.up3_conv(torch.cat([u, s2], dim=1))
+        u = self.up2(u)
+        u = self.up2_conv(torch.cat([u, s1], dim=1))
+        u = self.up1(u)
+        u = self.up1_conv(torch.cat([u, s0], dim=1))
 
-        u2 = self.up2(u1)        
-        u2 = self.up2_conv(torch.cat([u2, z], dim=1))
-
-        logits = self.seg_head(u2)                 
-        raw_depth = self.depth_head(u2).squeeze(1) 
+        logits = self.seg_head(u)
+        raw_depth = self.depth_head(u).squeeze(1)
 
         return logits, raw_depth
 
