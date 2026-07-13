@@ -14,7 +14,7 @@ from .models import load_model, save_model
 def train(
     exp_dir: str = "logs",
     model_name: str = "classifier",
-    num_epoch: int = 50,
+    num_epoch: int = 40,
     lr: float = 1e-3,
     batch_size: int = 128,
     seed: int = 2024,
@@ -54,8 +54,9 @@ def train(
         num_workers=2,
     )
 
-    loss_func = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    loss_func = torch.nn.CrossEntropyLoss(label_smoothing=0.05)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epoch)
 
     global_step = 0
     train_metric = AccuracyMetric()
@@ -93,11 +94,13 @@ def train(
 
         epoch_train_acc = train_metric.compute()["accuracy"]
         epoch_val_acc = val_metric.compute()["accuracy"]
+        scheduler.step()
 
         logger.add_scalar("train_accuracy", epoch_train_acc, global_step)
         logger.add_scalar("val_accuracy", epoch_val_acc, global_step)
+        logger.add_scalar("lr", scheduler.get_last_lr()[0], global_step)
 
-        if epoch == 0 or epoch == num_epoch - 1 or (epoch + 1) % 10 == 0:
+        if epoch == 0 or epoch == num_epoch - 1 or (epoch + 1) % 5 == 0:
             print(
                 f"Epoch {epoch + 1:2d} / {num_epoch:2d}: "
                 f"train_acc={epoch_train_acc:.4f} "
@@ -106,6 +109,7 @@ def train(
 
     save_model(model)
     torch.save(model.state_dict(), log_dir / f"{model_name}.th")
+    logger.close()
     print(f"Model saved to {log_dir / f'{model_name}.th'}")
 
 
@@ -114,13 +118,12 @@ if __name__ == "__main__":
 
     parser.add_argument("--exp_dir", type=str, default="logs")
     parser.add_argument("--model_name", type=str, default="classifier")
-    parser.add_argument("--num_epoch", type=int, default=50)
+    parser.add_argument("--num_epoch", type=int, default=40)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--seed", type=int, default=2024)
     parser.add_argument("--train_transform", type=str, default="aug")
 
-    # optional model kwargs (baked into Classifier defaults if omitted)
     parser.add_argument("--in_channels", type=int, default=3)
     parser.add_argument("--num_classes", type=int, default=6)
 

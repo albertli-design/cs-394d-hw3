@@ -26,28 +26,26 @@ class Classifier(nn.Module):
         self.register_buffer("input_mean", torch.as_tensor(INPUT_MEAN))
         self.register_buffer("input_std", torch.as_tensor(INPUT_STD))
 
-        # TODO: implement
-        # (B,3,64,64)->(B,32,32,32)->(B,64,16,16)->(B,128,8,8)->(B,256,4,4)->(B,num_classes)
-        self.network = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
+        def conv_block(cin: int, cout: int, stride: int = 1) -> nn.Sequential:
+            return nn.Sequential(
+                nn.Conv2d(cin, cout, kernel_size=3, stride=stride, padding=1, bias=False),
+                nn.BatchNorm2d(cout),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(cout, cout, kernel_size=3, stride=1, padding=1, bias=False),
+                nn.BatchNorm2d(cout),
+                nn.ReLU(inplace=True),
+            )
 
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            
-            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            
+        # 64x64 -> 32 -> 16 -> 8 -> 4, then global pool
+        self.network = nn.Sequential(
+            conv_block(in_channels, 64, stride=2),
+            conv_block(64, 128, stride=2),
+            conv_block(128, 256, stride=2),
+            conv_block(256, 512, stride=2),
+            nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Dropout(0.3),
-            nn.Linear(256 * 4 * 4, num_classes),
+            nn.Dropout(0.4),
+            nn.Linear(512, num_classes),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -58,13 +56,8 @@ class Classifier(nn.Module):
         Returns:
             tensor (b, num_classes) logits
         """
-        # optional: normalizes the input
         z = (x - self.input_mean[None, :, None, None]) / self.input_std[None, :, None, None]
-
-        # TODO: replace with actual forward pass
-        logits = self.network(z)
-
-        return logits
+        return self.network(z)
 
     def predict(self, x: torch.Tensor) -> torch.Tensor:
         """
