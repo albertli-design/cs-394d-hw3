@@ -109,23 +109,30 @@ class Detector(torch.nn.Module):
                 nn.ReLU(inplace=True),
             )
 
-        # U-Net: stem at full res, then 3 downsample levels
-        # (b,3,h,w) -> stem 32 -> d1 64 @ h/2 -> d2 128 @ h/4 -> d3 256 @ h/8
-        self.stem = conv_block(in_channels, 32)
-        self.down1 = nn.Sequential(nn.MaxPool2d(2), conv_block(32, 64))
-        self.down2 = nn.Sequential(nn.MaxPool2d(2), conv_block(64, 128))
-        self.down3 = nn.Sequential(nn.MaxPool2d(2), conv_block(128, 256))
+        # Wider U-Net for sharper lane boundaries (IoU EC needs >= 0.80)
+        self.stem = conv_block(in_channels, 48)
+        self.down1 = nn.Sequential(nn.MaxPool2d(2), conv_block(48, 96))
+        self.down2 = nn.Sequential(nn.MaxPool2d(2), conv_block(96, 192))
+        self.down3 = nn.Sequential(nn.MaxPool2d(2), conv_block(192, 384))
 
-        self.up3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.up3_conv = conv_block(128 + 128, 128)
-        self.up2 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.up2_conv = conv_block(64 + 64, 64)
-        self.up1 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
-        self.up1_conv = conv_block(32 + 32, 32)
+        self.up3 = nn.ConvTranspose2d(384, 192, kernel_size=2, stride=2)
+        self.up3_conv = conv_block(192 + 192, 192)
+        self.up2 = nn.ConvTranspose2d(192, 96, kernel_size=2, stride=2)
+        self.up2_conv = conv_block(96 + 96, 96)
+        self.up1 = nn.ConvTranspose2d(96, 48, kernel_size=2, stride=2)
+        self.up1_conv = conv_block(48 + 48, 48)
 
-        self.seg_head = nn.Conv2d(32, num_classes, kernel_size=1)
+        self.seg_head = nn.Sequential(
+            nn.Conv2d(48, 48, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(48),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(48, num_classes, kernel_size=1),
+        )
         self.depth_head = nn.Sequential(
-            nn.Conv2d(32, 1, kernel_size=1),
+            nn.Conv2d(48, 48, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(48),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(48, 1, kernel_size=1),
             nn.Sigmoid(),
         )
 
@@ -144,10 +151,10 @@ class Detector(torch.nn.Module):
         """
         z = (x - self.input_mean[None, :, None, None]) / self.input_std[None, :, None, None]
 
-        s0 = self.stem(z)       # (b, 32, h, w)
-        s1 = self.down1(s0)     # (b, 64, h/2, w/2)
-        s2 = self.down2(s1)     # (b, 128, h/4, w/4)
-        s3 = self.down3(s2)     # (b, 256, h/8, w/8)
+        s0 = self.stem(z)
+        s1 = self.down1(s0)
+        s2 = self.down2(s1)
+        s3 = self.down3(s2)
 
         u = self.up3(s3)
         u = self.up3_conv(torch.cat([u, s2], dim=1))
@@ -176,8 +183,6 @@ class Detector(torch.nn.Module):
         """
         logits, raw_depth = self(x)
         pred = logits.argmax(dim=1)
-
-        # Optional additional post-processing for depth only if needed
         depth = raw_depth
 
         return pred, depth
