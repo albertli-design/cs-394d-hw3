@@ -27,7 +27,7 @@ class Classifier(nn.Module):
         self.register_buffer("input_std", torch.as_tensor(INPUT_STD))
 
         # TODO: implement
-
+        # (B,3,64,64)->(B,32,32,32)->(B,64,16,16)->(B,128,8,8)->(B,256,4,4)->(B,num_classes)
         self.network = nn.Sequential(
             nn.Conv2d(in_channels, 32, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(32),
@@ -99,22 +99,25 @@ class Detector(torch.nn.Module):
         self.register_buffer("input_mean", torch.as_tensor(INPUT_MEAN))
         self.register_buffer("input_std", torch.as_tensor(INPUT_STD))
 
+        # helper function to create convolutional block
         def conv_block(cin: int, cout: int) -> nn.Sequential:
             return nn.Sequential(
                 nn.Conv2d(cin, cout, kernel_size=3, stride=1, padding=1, bias=False),
                 nn.BatchNorm2d(cout),
                 nn.ReLU(inplace=True),
+
                 nn.Conv2d(cout, cout, kernel_size=3, stride=1, padding=1, bias=False),
                 nn.BatchNorm2d(cout),
                 nn.ReLU(inplace=True),
             )
 
-        # Wider U-Net for sharper lane boundaries (IoU EC needs >= 0.80)
+        # encoder
         self.stem = conv_block(in_channels, 48)
         self.down1 = nn.Sequential(nn.MaxPool2d(2), conv_block(48, 96))
         self.down2 = nn.Sequential(nn.MaxPool2d(2), conv_block(96, 192))
         self.down3 = nn.Sequential(nn.MaxPool2d(2), conv_block(192, 384))
 
+        # decoder
         self.up3 = nn.ConvTranspose2d(384, 192, kernel_size=2, stride=2)
         self.up3_conv = conv_block(192 + 192, 192)
         self.up2 = nn.ConvTranspose2d(192, 96, kernel_size=2, stride=2)
@@ -122,12 +125,15 @@ class Detector(torch.nn.Module):
         self.up1 = nn.ConvTranspose2d(96, 48, kernel_size=2, stride=2)
         self.up1_conv = conv_block(48 + 48, 48)
 
+        # segmentation head
         self.seg_head = nn.Sequential(
             nn.Conv2d(48, 48, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(48),
             nn.ReLU(inplace=True),
             nn.Conv2d(48, num_classes, kernel_size=1),
         )
+
+        # depth head
         self.depth_head = nn.Sequential(
             nn.Conv2d(48, 48, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(48),
@@ -151,11 +157,13 @@ class Detector(torch.nn.Module):
         """
         z = (x - self.input_mean[None, :, None, None]) / self.input_std[None, :, None, None]
 
+        # encoder
         s0 = self.stem(z)
         s1 = self.down1(s0)
         s2 = self.down2(s1)
         s3 = self.down3(s2)
 
+        # decoder
         u = self.up3(s3)
         u = self.up3_conv(torch.cat([u, s2], dim=1))
         u = self.up2(u)
@@ -163,10 +171,11 @@ class Detector(torch.nn.Module):
         u = self.up1(u)
         u = self.up1_conv(torch.cat([u, s0], dim=1))
 
+        # segmentation head
         logits = self.seg_head(u)
-        raw_depth = self.depth_head(u).squeeze(1)
+        depth = self.depth_head(u).squeeze(1)
 
-        return logits, raw_depth
+        return logits, depth
 
     def predict(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """

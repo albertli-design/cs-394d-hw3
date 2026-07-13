@@ -13,14 +13,12 @@ from .models import load_model, save_model
 
 
 def soft_dice_loss(logits: torch.Tensor, targets: torch.Tensor, num_classes: int = 3) -> torch.Tensor:
-    """Per-class soft Dice averaged over classes (helps IoU directly)."""
+    """Per-class soft Dice averaged over classes"""
     probs = F.softmax(logits, dim=1)
     targets_oh = F.one_hot(targets, num_classes=num_classes).permute(0, 3, 1, 2).float()
 
     dims = (0, 2, 3)
-    intersection = (probs * targets_oh).sum(dims)
-    union = probs.sum(dims) + targets_oh.sum(dims)
-    dice = (2 * intersection + 1e-5) / (union + 1e-5)
+    dice = (2 * (probs * targets_oh).sum(dims) + 1e-5) / (probs.sum(dims) + targets_oh.sum(dims) + 1e-5)
     return 1.0 - dice.mean()
 
 
@@ -70,7 +68,6 @@ def train(
         num_workers=2,
     )
 
-    # stronger lane emphasis for the last ~0.03 IoU gap to 0.80 EC
     class_weights = torch.tensor([1.0, 15.0, 15.0], device=device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epoch)
@@ -78,7 +75,6 @@ def train(
     global_step = 0
     train_metric = DetectionMetric()
     val_metric = DetectionMetric()
-    best_val_iou = -1.0
 
     for epoch in range(num_epoch):
         train_metric.reset()
@@ -88,7 +84,7 @@ def train(
         for batch in train_data:
             image = batch["image"].to(device)
             depth = batch["depth"].to(device)
-            track = batch["track"].to(device)
+            track = batch["track"].to(device).long()
 
             optimizer.zero_grad()
             logits, depth_pred = model(image)
@@ -116,7 +112,7 @@ def train(
             for batch in val_data:
                 image = batch["image"].to(device)
                 depth = batch["depth"].to(device)
-                track = batch["track"].to(device)
+                track = batch["track"].to(device).long()
 
                 logits, depth_pred = model(image)
                 preds = logits.argmax(dim=1)
@@ -144,13 +140,9 @@ def train(
                 f"tp_depth_err={val_stats['tp_depth_error']:.4f}"
             )
 
-        if val_stats["iou"] > best_val_iou:
-            best_val_iou = val_stats["iou"]
-            save_model(model)
-            torch.save(model.state_dict(), log_dir / f"{model_name}.th")
-            print(f"  new best val_iou={best_val_iou:.4f} -> saved")
-
-    print(f"Best val_iou={best_val_iou:.4f}")
+    save_model(model)
+    torch.save(model.state_dict(), log_dir / f"{model_name}.th")
+    logger.close()
     print(f"Model saved to {log_dir / f'{model_name}.th'}")
 
 
